@@ -42,6 +42,11 @@ type IndexFileItem struct {
 	Info os.FileInfo
 }
 
+type Directory struct {
+	size  map[string]int64
+	mutex *sync.RWMutex
+}
+
 type HTTPStaticServer struct {
 	Root            string
 	Prefix          string
@@ -142,7 +147,7 @@ func (s *HTTPStaticServer) hIndex(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "HEAD" {
 			return
 		}
-		renderHTML(w, "index.html", s)
+		renderHTML(w, "assets/index.html", s)
 	} else {
 		if filepath.Base(path) == YAMLCONF {
 			auth := s.readAccessConf(realPath)
@@ -423,7 +428,7 @@ func (s *HTTPStaticServer) hIpaLink(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/html")
 	log.Println("PlistURL:", plistUrl)
-	renderHTML(w, "ipa-install.html", map[string]string{
+	renderHTML(w, "assets/ipa-install.html", map[string]string{
 		"Name":      filepath.Base(path),
 		"PlistLink": plistUrl,
 	})
@@ -630,7 +635,7 @@ func (s *HTTPStaticServer) hJSONList(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
-var dirSizeMap = make(map[string]int64)
+var dirInfoSize = Directory{size: make(map[string]int64), mutex: &sync.RWMutex{}}
 
 func (s *HTTPStaticServer) makeIndex() error {
 	var indexes = make([]IndexFileItem, 0)
@@ -650,21 +655,28 @@ func (s *HTTPStaticServer) makeIndex() error {
 		return nil
 	})
 	s.indexes = indexes
-	dirSizeMap = make(map[string]int64)
 	return err
 }
 
 func (s *HTTPStaticServer) historyDirSize(dir string) int64 {
-	var size int64
-	if size, ok := dirSizeMap[dir]; ok {
+	dirInfoSize.mutex.RLock()
+	size, ok := dirInfoSize.size[dir]
+	dirInfoSize.mutex.RUnlock()
+
+	if ok {
 		return size
 	}
+
 	for _, fitem := range s.indexes {
 		if filepath.HasPrefix(fitem.Path, dir) {
 			size += fitem.Info.Size()
 		}
 	}
-	dirSizeMap[dir] = size
+
+	dirInfoSize.mutex.Lock()
+	dirInfoSize.size[dir] = size
+	dirInfoSize.mutex.Unlock()
+
 	return size
 }
 
@@ -729,10 +741,9 @@ func (s *HTTPStaticServer) readAccessConf(realPath string) (ac AccessConf) {
 }
 
 func deepPath(basedir, name string) string {
-	isDir := true
 	// loop max 5, incase of for loop not finished
 	maxDepth := 5
-	for depth := 0; depth <= maxDepth && isDir; depth += 1 {
+	for depth := 0; depth <= maxDepth; depth += 1 {
 		finfos, err := ioutil.ReadDir(filepath.Join(basedir, name))
 		if err != nil || len(finfos) != 1 {
 			break
@@ -784,7 +795,7 @@ var (
 	_tmpls = make(map[string]*template.Template)
 )
 
-func executeTemplate(w http.ResponseWriter, name string, v interface{}) {
+func renderHTML(w http.ResponseWriter, name string, v interface{}) {
 	if t, ok := _tmpls[name]; ok {
 		t.Execute(w, v)
 		return
@@ -792,16 +803,6 @@ func executeTemplate(w http.ResponseWriter, name string, v interface{}) {
 	t := template.Must(template.New(name).Funcs(funcMap).Delims("[[", "]]").Parse(assetsContent(name)))
 	_tmpls[name] = t
 	t.Execute(w, v)
-}
-
-func renderHTML(w http.ResponseWriter, name string, v interface{}) {
-	if _, ok := Assets.(http.Dir); ok {
-		log.Println("Hot load", name)
-		t := template.Must(template.New(name).Funcs(funcMap).Delims("[[", "]]").Parse(assetsContent(name)))
-		t.Execute(w, v)
-	} else {
-		executeTemplate(w, name, v)
-	}
 }
 
 func checkFilename(name string) error {
